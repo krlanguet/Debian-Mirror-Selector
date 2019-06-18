@@ -10,6 +10,12 @@ import (
     "io/ioutil"
     "log"
     "github.com/davecgh/go-spew/spew"
+
+    // File IO
+    "bufio"
+
+     // Requesting Webpages
+    "net/http"
 )
 
 type Logger struct {
@@ -123,6 +129,30 @@ type site struct {
 //      Scan for sites, sending into parsedSites
 //      When all scanned, close parsedSites and exit
 func mirrorListReader(INFILE string, parsedSites chan *site) {
+    defer close(parsedSites)
+    var reader *bufio.Reader
+    
+    if INFILE != "" {
+        file, err := os.Open(INFILE)
+        if err != nil {
+            logger.Fatalln(err)
+        }
+        reader = bufio.NewReader(file)
+        defer file.Close()
+    } else {
+        resp, err := http.Get("https://www.debian.org/mirror/list-full")
+        if err != nil {
+            logger.Fatalln(err)
+        }
+        defer resp.Body.Close()
+        reader = bufio.NewReader(resp.Body)
+    }
+
+    scanner := bufio.NewScanner(reader)
+    for scanner.Scan() {
+        s := &site{dumbyVar: scanner.Text()}
+        parsedSites <- s
+    }
 }
 
 //  The Scoring Dispatcher will:
@@ -141,6 +171,10 @@ func mirrorListReader(INFILE string, parsedSites chan *site) {
 //      Run ping/traceroute algorithm
 //      Whether succeeds or times out, send into scores and exit
 func scoringDispatcher(parsedSites chan *site, noMoreScorers chan bool) {
+    for s := range parsedSites {
+        logger.Println(s.dumbyVar)   
+    }
+    noMoreScorers <- true
 }
 
 //  The Results Accumulator will:
@@ -158,4 +192,5 @@ func scoringDispatcher(parsedSites chan *site, noMoreScorers chan bool) {
 //      Format sites and write to OUTFILE.
 //      Exit
 func resultsAccumulator(noMoreScorers chan bool) {
+    <- noMoreScorers
 }
