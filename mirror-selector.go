@@ -79,4 +79,65 @@ func main() {
     `
     arguments, _ := docopt.ParseDoc(usage)
     logger.Dump(arguments)
+
+    //  Main will spawn the following coroutines:
+    //      * File Reader           - Asynchronously parses file
+    //      * Scoring Dispatcher    - Receives sites from Reader and spawns scorers
+    //          * Scorers
+    //  And the blocking call:
+    //      * Results Accumulator   - Awaits completion of Scorers created by Dispatcher
+    //
+    //  All of which will communicate over the following channels:
+
+    //parsedSites
+    // Buffered site* channel to asynchronously parse file
+
+    //scorerCreated
+    // Blocking bool channek so the Accumulator always counts the creation of a Scorer before 
+    //  receiving its score.
+
+    //noMoreScorers
+    // Bool channel to inform the Accumulator that it can start counting down to completion.
+
+    //scores
+    // Buffered site* channel so finished scorers will exit without waiting on the Accumulator,
+    //  which would otherwise waste memory.
+    // NOTE: This depends on the relationship between Scoring Dispatcher limiting and scores
+    //  buffer size
 }
+
+//  The File Reader will:
+//      Read INFILE or Request 'http://www.debian.org/mirror/list-full'
+//      Scan for sites, sending into parsedSites
+//      When all scanned, close parsedSites and exit
+
+//  The Scoring Dispatcher will:
+//      Iterate over parsedSites:
+//          If site matches all filtering criteria:
+//              Send into scorerCreated
+//              Spawn a Scorer coroutine
+//      When all sites have been found:
+//          Send true into noMoreScorers
+//          Exit
+
+//  Each Scorer will:
+//      Try connecting over desired protocols
+//      If connection fails:
+//          Send worst score into scores and exit
+//      Run ping/traceroute algorithm
+//      Whether succeeds or times out, send into scores and exit
+
+//  The Results Accumulator will:
+//      Infinitely select over:
+//          scorerCreated:
+//              Increment count of active scorers
+//          noMoreScorers:
+//              set done variable to true
+//          scores:
+//              Push site on a best-score heap
+//              Decrement active scorers count
+//              If done and count is zero:
+//                  Break out of infinite select loop
+//      Pop sites off of heap.
+//      Format sites and write to OUTFILE.
+//      Exit
