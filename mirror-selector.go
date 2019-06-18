@@ -5,8 +5,36 @@ import (
     "github.com/docopt/docopt-go"
 
     // Logging
+    "os"
+    "io"
+    "io/ioutil"
+    "log"
     "github.com/davecgh/go-spew/spew"
 )
+
+type Logger struct {
+    *log.Logger
+    out io.Writer
+}
+
+func (l *Logger) Dump(a ...interface{}) {
+    spew.Fdump(l.out, a...)
+}
+
+func NewLogger(logOn bool) Logger {
+    var out io.Writer
+    if logOn {
+        out = os.Stdout
+    } else {
+        out = ioutil.Discard
+    }
+    return Logger{
+        Logger: log.New(out, "", log.LstdFlags),
+        out: out,
+    }
+}
+
+var logger = NewLogger(true)
 
 func main() {
     usage := `Name:
@@ -50,5 +78,5 @@ func main() {
        -v --version              Prints the version information.
     `
     arguments, _ := docopt.ParseDoc(usage)
-    spew.Dump(arguments)
+    logger.Dump(arguments)
 }
