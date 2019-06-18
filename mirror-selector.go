@@ -89,27 +89,41 @@ func main() {
     //
     //  All of which will communicate over the following channels:
 
-    //parsedSites
+    siteBufferSize := 32
+    parsedSites := make(chan *site, siteBufferSize)
     // Buffered site* channel to asynchronously parse file
 
-    //scorerCreated
+    //scorerCreated := make(chan bool)
     // Blocking bool channek so the Accumulator always counts the creation of a Scorer before 
     //  receiving its score.
 
-    //noMoreScorers
+    noMoreScorers := make(chan bool, 1)
     // Bool channel to inform the Accumulator that it can start counting down to completion.
 
-    //scores
+    //scoreBufferSize := 32
+    //scores := make(chan *site, scoreBufferSize)
     // Buffered site* channel so finished scorers will exit without waiting on the Accumulator,
     //  which would otherwise waste memory.
     // NOTE: This depends on the relationship between Scoring Dispatcher limiting and scores
     //  buffer size
+
+    go mirrorListReader("", parsedSites)
+    
+    go scoringDispatcher(parsedSites, noMoreScorers)
+    
+    resultsAccumulator(noMoreScorers)
+}
+
+type site struct {
+    dumbyVar string
 }
 
 //  The File Reader will:
 //      Read INFILE or Request 'http://www.debian.org/mirror/list-full'
 //      Scan for sites, sending into parsedSites
 //      When all scanned, close parsedSites and exit
+func mirrorListReader(INFILE string, parsedSites chan *site) {
+}
 
 //  The Scoring Dispatcher will:
 //      Iterate over parsedSites:
@@ -126,6 +140,8 @@ func main() {
 //          Send worst score into scores and exit
 //      Run ping/traceroute algorithm
 //      Whether succeeds or times out, send into scores and exit
+func scoringDispatcher(parsedSites chan *site, noMoreScorers chan bool) {
+}
 
 //  The Results Accumulator will:
 //      Infinitely select over:
@@ -141,3 +157,5 @@ func main() {
 //      Pop sites off of heap.
 //      Format sites and write to OUTFILE.
 //      Exit
+func resultsAccumulator(noMoreScorers chan bool) {
+}
