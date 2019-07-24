@@ -5,42 +5,17 @@ import (
     "github.com/docopt/docopt-go"
 
     // Logging
-    "os"
-    "io"
-    "io/ioutil"
-    "log"
-    "github.com/davecgh/go-spew/spew"
+    "github.com/krlanguet/debian-mirror-selector/log"
 
-    // File IO
+    // File IO  
     "bufio"
+    "os"
 
      // Requesting Webpages
     "net/http"
 )
 
-type Logger struct {
-    *log.Logger
-    out io.Writer
-}
-
-func (l *Logger) Dump(a ...interface{}) {
-    spew.Fdump(l.out, a...)
-}
-
-func NewLogger(logOn bool) Logger {
-    var out io.Writer
-    if logOn {
-        out = os.Stdout
-    } else {
-        out = ioutil.Discard
-    }
-    return Logger{
-        Logger: log.New(out, "", log.LstdFlags),
-        out: out,
-    }
-}
-
-var logger = NewLogger(true)
+var logger = log.New(true)
 
 func main() {
     usage := `Name:
