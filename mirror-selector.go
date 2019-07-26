@@ -18,79 +18,82 @@ import (
 	"strings"
 )
 
+var usage = `Name:
+Debian-Mirror-Selector - Creates a sources.list file with the fastest Debian package mirrors that fit specified criteria.
+
+Description:
+    Filters mirrors (by default: parsed from https://www.debian.org/mirror/list-full) for those
+     which serve the given version (default: stable), support the given architecture (default: that
+     of current machine, as reported by dpkg), and respond to the given protocols (default: HTTPS).
+     These mirrors are sorted by a netelect-inspired ping implementation, and used to construct
+     the output file (default: ./sources.list).
+
+Example:
+    mirror-selector --release unstable --protocols https,ftp
+
+Usage:
+    mirror-selector [-ns] [-p <P1,P2,...>] [-a <ARCH>] [-r <RELEASE>] [-o <OUTFILE>] [<INFILE>]
+    mirror-selector (-h | --help)
+    mirror-selector (-v | --version)
+
+Options:
+   INFILE                    File to read mirrors from. Must have same formatting as
+                               https://www.debian.org/mirror/list-full.
+   -o --out-file OUTFILE     File to output to [default: ./sources.list]. Writes in sources.list
+                               format regardless.
+   -n --nonfree              Output file will also include non-free sections.
+   -s --source-packages      Output file will include deb-src lines for use with apt-get source
+                               to obtain Debian source packages.
+   -p --protocols P1,P2,...  Protocols which mirrors must serve on [default: https].
+  
+   -a --architecture ARCH    Which architecture to look for. Accepts any of:
+                               all, amd64, arm64, armel, armhf, hurd-i386, i386, ia64,
+                               kfreebsd-amd64, kfreebsd-i386, mips, mips64el, mipsel, powerpc,
+                               ppc64el, s390, s390x, source, or sparc. Defaults to consulting
+                               dpkg for current machine architecture.
+                                                        
+   -r --release RELEASE      Which Debian release to look for [default: stable]. Accepts
+                               targets (stable, testing, unstable, or experimental) or 
+                               code names (wheezy, jessie, stretch, ... etc.).
+   -h --help                 Prints this help text.
+   -v --version              Prints the version information.
+`
+
+// This program uses the following architecture:
+//  - Main parses file into sites
+//  - Main spawns Scoring Dispatcher
+//      - Dispatcher filters sites and spawns Scorers
+//          - Scorers connect and profile each site
+//  - Main calls Accumulator
+//      - Acc. counts created scorers
+//      - Acc. collects completed work from dispatched Scorers
+//  - Main writes the output file
+//
+//  Routines communicate over the following channels:
+
+var scorerCreated = make(chan bool)
+
+// Blocking bool channel so the Accumulator always counts the creation of a Scorer before
+//  receiving its score.
+
+var noMoreScorers = make(chan bool, 1)
+
+// Bool channel to inform the Accumulator that it can start counting down to completion.
+
+var scoreBufferSize = 32
+var scores = make(chan *site, scoreBufferSize)
+
+// Buffered site* channel so finished scorers will typically exit without waiting on the
+//  Accumulator, which would otherwise waste memory.
+// NOTE: This depends on the relationship between Scoring Dispatcher limiting and scores
+//  buffer size
+
 var log = logger.New(true)
 
 func main() {
 	start := time.Now()
-	usage := `Name:
-    Debian-Mirror-Selector - Creates a sources.list file with the fastest Debian package mirrors that fit specified criteria.
-
-    Description:
-        Filters mirrors (by default: parsed from https://www.debian.org/mirror/list-full) for those
-         which serve the given version (default: stable), support the given architecture (default: that
-         of current machine, as reported by dpkg), and respond to the given protocols (default: HTTPS).
-         These mirrors are sorted by a netelect-inspired ping implementation, and used to construct
-         the output file (default: ./sources.list).
-
-    Example:
-        mirror-selector --release unstable --protocols https,ftp
-
-    Usage:
-        mirror-selector [-ns] [-p <P1,P2,...>] [-a <ARCH>] [-r <RELEASE>] [-o <OUTFILE>] [<INFILE>]
-        mirror-selector (-h | --help)
-        mirror-selector (-v | --version)
-
-    Options:
-       INFILE                    File to read mirrors from. Must have same formatting as
-                                   https://www.debian.org/mirror/list-full.
-       -o --out-file OUTFILE     File to output to [default: ./sources.list]. Writes in sources.list
-                                   format regardless.
-       -n --nonfree              Output file will also include non-free sections.
-       -s --source-packages      Output file will include deb-src lines for use with apt-get source
-                                   to obtain Debian source packages.
-       -p --protocols P1,P2,...  Protocols which mirrors must serve on [default: https].
-      
-       -a --architecture ARCH    Which architecture to look for. Accepts any of:
-                                   all, amd64, arm64, armel, armhf, hurd-i386, i386, ia64,
-                                   kfreebsd-amd64, kfreebsd-i386, mips, mips64el, mipsel, powerpc,
-                                   ppc64el, s390, s390x, source, or sparc. Defaults to consulting
-                                   dpkg for current machine architecture.
-                                                            
-       -r --release RELEASE      Which Debian release to look for [default: stable]. Accepts
-                                   targets (stable, testing, unstable, or experimental) or 
-                                   code names (wheezy, jessie, stretch, ... etc.).
-       -h --help                 Prints this help text.
-       -v --version              Prints the version information.
-    `
 	arguments, _ := docopt.ParseDoc(usage)
-	//log.Dump(arguments)
 	cliArgsParsed := time.Now()
-
-	// This program uses the following architecture:
-	//  - Main parses file into sites
-	//  - Main spawns Scoring Dispatcher
-	//      - Dispatcher filters sites and spawns Scorers
-	//          - Scorers connect and profile each site
-	//  - Main calls Accumulator
-	//      - Acc. counts created scorers
-	//      - Acc. collects completed work from dispatched Scorers
-	//  - Main writes the output file
-	//
-	//  Routines communicate over the following channels:
-
-	scorerCreated := make(chan bool)
-	// Blocking bool channel so the Accumulator always counts the creation of a Scorer before
-	//  receiving its score.
-
-	noMoreScorers := make(chan bool, 1)
-	// Bool channel to inform the Accumulator that it can start counting down to completion.
-
-	scoreBufferSize := 32
-	scores := make(chan *site, scoreBufferSize)
-	// Buffered site* channel so finished scorers will typically exit without waiting on the
-	//  Accumulator, which would otherwise waste memory.
-	// NOTE: This depends on the relationship between Scoring Dispatcher limiting and scores
-	//  buffer size
 
 	// Load document for parsing
 	var doc *html.Node
@@ -218,12 +221,12 @@ func main() {
 		}
 	*/
 
-	go scoringDispatcher(sites, scorerCreated, noMoreScorers, scores)
+	go scoringDispatcher(sites)
 
-	results := resultsAccumulator(scorerCreated, noMoreScorers, scores)
+	results := resultsAccumulator()
 
-        scoringDone := time.Now()
-	
+	scoringDone := time.Now()
+
 	log.Println(results)
 	log.Println("Parsing CLI Arguments took", cliArgsParsed.Sub(start))
 	log.Println("Loading document took", documentLoaded.Sub(cliArgsParsed))
@@ -248,11 +251,11 @@ type site struct {
 //      When all sites have been found:
 //          Send true into noMoreScorers
 //          Exit
-func scoringDispatcher(sites []*site, scorerCreated chan bool, noMoreScorers chan bool, scores chan *site) {
+func scoringDispatcher(sites []*site) {
 	for _, s := range sites {
 		if true {
 			scorerCreated <- true
-			go score(s, scores)
+			go score(s)
 		}
 	}
 	noMoreScorers <- true
@@ -264,7 +267,7 @@ func scoringDispatcher(sites []*site, scorerCreated chan bool, noMoreScorers cha
 //          Send worst score into scores and exit
 //      Run ping/traceroute algorithm
 //      Whether succeeds or times out, send into scores and exit
-func score(s *site, scores chan *site) {
+func score(s *site) {
 	s.Score = 0
 	scores <- s
 }
@@ -283,8 +286,8 @@ func score(s *site, scores chan *site) {
 //      Pop sites off of heap.
 //      Format sites and write to OUTFILE.
 //      Exit
-func resultsAccumulator(scorerCreated chan bool, noMoreScorers chan bool, scores chan *site) []int {
-        results := make([]int, 0)
+func resultsAccumulator() []int {
+	results := make([]int, 0)
 	done := false
 	scorers := 0
 	for {
@@ -302,7 +305,7 @@ func resultsAccumulator(scorerCreated chan bool, noMoreScorers chan bool, scores
 			//Heap
 			scorers--
 			if done && scorers == 0 {
-                            return results
+				return results
 			}
 		}
 	}
