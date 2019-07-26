@@ -1,24 +1,22 @@
 package main
 
 import (
-    // Argument Parsing
-    "github.com/docopt/docopt-go"
+	// Argument Parsing
+	"github.com/docopt/docopt-go"
 
-    // Logging
-    "github.com/krlanguet/debian-mirror-selector/log"
+	// Logging
+	"github.com/krlanguet/debian-mirror-selector/logger"
 
-    // File IO  
-    "bufio"
-    "os"
-
-     // Requesting Webpages
-    "net/http"
+	"bufio"
+	"github.com/antchfx/htmlquery"
+	"golang.org/x/net/html"
+	"os"
 )
 
-var logger = log.New(true)
+var log = logger.New(true)
 
 func main() {
-    usage := `Name:
+	usage := `Name:
     Debian-Mirror-Selector - Creates a sources.list file with the fastest Debian package mirrors that fit specified criteria.
 
     Description:
@@ -58,76 +56,117 @@ func main() {
        -h --help                 Prints this help text.
        -v --version              Prints the version information.
     `
-    arguments, _ := docopt.ParseDoc(usage)
-    logger.Dump(arguments)
+	arguments, _ := docopt.ParseDoc(usage)
+	//log.Dump(arguments)
 
-    //  Main will spawn the following coroutines:
-    //      * File Reader           - Asynchronously parses file
-    //      * Scoring Dispatcher    - Receives sites from Reader and spawns scorers
-    //          * Scorers
-    //  And the blocking call:
-    //      * Results Accumulator   - Awaits completion of Scorers created by Dispatcher
-    //
-    //  All of which will communicate over the following channels:
+	// This program uses the following architecture:
+	//  - Main parses file into sites
+	//  - Main spawns Scoring Dispatcher
+	//      - Dispatcher filters sites and spawns Scorers
+	//          - Scorers connect and profile each site
+	//  - Main calls Accumulator
+	//      - Acc. counts created scorers
+	//      - Acc. collects completed work from dispatched Scorers
+	//  - Main writes the output file
+	//
+	//  Routines communicate over the following channels:
 
-    siteBufferSize := 32
-    parsedSites := make(chan *site, siteBufferSize)
-    // Buffered site* channel to asynchronously parse file
+	//scorerCreated := make(chan bool)
+	// Blocking bool channel so the Accumulator always counts the creation of a Scorer before
+	//  receiving its score.
 
-    //scorerCreated := make(chan bool)
-    // Blocking bool channek so the Accumulator always counts the creation of a Scorer before 
-    //  receiving its score.
+	//noMoreScorers := make(chan bool, 1)
+	// Bool channel to inform the Accumulator that it can start counting down to completion.
 
-    noMoreScorers := make(chan bool, 1)
-    // Bool channel to inform the Accumulator that it can start counting down to completion.
+	//scoreBufferSize := 32
+	//scores := make(chan *site, scoreBufferSize)
+	// Buffered site* channel so finished scorers will exit without waiting on the Accumulator,
+	//  which would otherwise waste memory.
+	// NOTE: This depends on the relationship between Scoring Dispatcher limiting and scores
+	//  buffer size
 
-    //scoreBufferSize := 32
-    //scores := make(chan *site, scoreBufferSize)
-    // Buffered site* channel so finished scorers will exit without waiting on the Accumulator,
-    //  which would otherwise waste memory.
-    // NOTE: This depends on the relationship between Scoring Dispatcher limiting and scores
-    //  buffer size
+	// Load document for parsing
+	var doc *html.Node
+	var err error
+	if arguments["<INFILE>"] == nil {
+		doc, err = htmlquery.LoadURL("https://www.debian.org/mirror/list-full")
+		if err != nil {
+			log.Fatalln(err)
+		}
+	} else {
+		file, err := os.Open(arguments["<INFILE>"].(string))
+		if err != nil {
+			log.Fatalln(err)
+		}	
 
-    go mirrorListReader("", parsedSites)
-    
-    go scoringDispatcher(parsedSites, noMoreScorers)
-    
-    resultsAccumulator(noMoreScorers)
+		doc, err = htmlquery.Parse(bufio.NewReader(file))
+		if err != nil {
+			log.Fatalln(err)
+		}
+		file.Close()
+	}
+
+	// Parse HTML tree for markers
+	contentDiv := htmlquery.FindOne(doc, "/html/body/div[@id='content']")
+	countryDivs := htmlquery.Find(contentDiv, "/h3")
+	siteDivs := htmlquery.Find(contentDiv, "/text()[normalize-space(.)='Site:']")
+
+	log.Println("Found", len(countryDivs), "countries.")
+	log.Println("Found", len(siteDivs), "sites.")
+
+	// Storage for Sites
+	sites := make([]site, 0)
+
+	// Loop through sibling nodes in document
+	// Current state through loop, starts with none found
+	countryIndex := -1
+	siteIndex := -1
+	node := countryDivs[0].PrevSibling
+	var s site
+
+	for true {
+		node = node.NextSibling
+		if node == nil {
+			// We've reached end of document when there are no more siblings
+			sites = append(sites, s)
+			break
+		} else if countryIndex+1 < len(countryDivs) && node == countryDivs[countryIndex+1] {
+			// Mark that we've entered a new country
+			countryIndex++
+		} else if siteIndex+1 < len(siteDivs) && node == siteDivs[siteIndex+1] {
+			// Mark that we've entered a new site, saving the old to the slice
+			if siteIndex != -1 {
+				sites = append(sites, s)
+			}
+			siteIndex++
+			s = site{Strings: make([]string, 0)}
+		} else {
+			// Parse this node for site content
+			s.Strings = append(s.Strings, htmlquery.OutputHTML(node, true))
+		}
+	}
+
+	/*
+		log.Println(len(sites))
+		for _, s := range sites[:5] {
+	    	    log.Println(s.Strings)
+		}
+	*/
+
+	//log.Println(htmlquery.OutputHTML(mirrorListDiv, true))
+
+	//go scoringDispatcher(parsedSites, noMoreScorers)
+
+	//resultsAccumulator(noMoreScorers)
 }
 
 type site struct {
-    dumbyVar string
-}
-
-//  The File Reader will:
-//      Read INFILE or Request 'http://www.debian.org/mirror/list-full'
-//      Scan for sites, sending into parsedSites
-//      When all scanned, close parsedSites and exit
-func mirrorListReader(INFILE string, parsedSites chan *site) {
-    defer close(parsedSites)
-    var reader *bufio.Reader
-    
-    if INFILE != "" {
-        file, err := os.Open(INFILE)
-        if err != nil {
-            logger.Fatalln(err)
-        }
-        reader = bufio.NewReader(file)
-        defer file.Close()
-    } else {
-        resp, err := http.Get("https://www.debian.org/mirror/list-full")
-        if err != nil {
-            logger.Fatalln(err)
-        }
-        defer resp.Body.Close()
-        reader = bufio.NewReader(resp.Body)
-    }
-
-    scanner := bufio.NewScanner(reader)
-    for scanner.Scan() {
-        s := &site{dumbyVar: scanner.Text()}
-        parsedSites <- s
-    }
+	Strings         []string
+	SiteUrl         string
+	SiteType        string
+	Architectures   []string
+	Protocols       []string
+	UpdateFrequency string
 }
 
 //  The Scoring Dispatcher will:
@@ -145,12 +184,12 @@ func mirrorListReader(INFILE string, parsedSites chan *site) {
 //          Send worst score into scores and exit
 //      Run ping/traceroute algorithm
 //      Whether succeeds or times out, send into scores and exit
-func scoringDispatcher(parsedSites chan *site, noMoreScorers chan bool) {
-    for s := range parsedSites {
-        logger.Println(s.dumbyVar)   
-    }
-    noMoreScorers <- true
-}
+//func scoringDispatcher(parsedSites chan *site, noMoreScorers chan bool) {
+//    for s := range parsedSites {
+//        log.Println(s.dumbyVar)
+//    }
+//    noMoreScorers <- true
+//}
 
 //  The Results Accumulator will:
 //      Infinitely select over:
@@ -166,6 +205,6 @@ func scoringDispatcher(parsedSites chan *site, noMoreScorers chan bool) {
 //      Pop sites off of heap.
 //      Format sites and write to OUTFILE.
 //      Exit
-func resultsAccumulator(noMoreScorers chan bool) {
-    <- noMoreScorers
-}
+//func resultsAccumulator(noMoreScorers chan bool) {
+//    <- noMoreScorers
+//}
