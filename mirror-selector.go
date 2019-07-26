@@ -6,16 +6,22 @@ import (
 
 	// Logging
 	"github.com/krlanguet/debian-mirror-selector/logger"
+	"time"
 
-	"bufio"
+	// File IO
+	"os"
+
+	// Mirror List Parsing
 	"github.com/antchfx/htmlquery"
 	"golang.org/x/net/html"
-	"os"
+	"net/url"
+	"strings"
 )
 
 var log = logger.New(true)
 
 func main() {
+	start := time.Now()
 	usage := `Name:
     Debian-Mirror-Selector - Creates a sources.list file with the fastest Debian package mirrors that fit specified criteria.
 
@@ -58,6 +64,7 @@ func main() {
     `
 	arguments, _ := docopt.ParseDoc(usage)
 	//log.Dump(arguments)
+	cliArgsParsed := time.Now()
 
 	// This program uses the following architecture:
 	//  - Main parses file into sites
@@ -71,17 +78,17 @@ func main() {
 	//
 	//  Routines communicate over the following channels:
 
-	//scorerCreated := make(chan bool)
+	scorerCreated := make(chan bool)
 	// Blocking bool channel so the Accumulator always counts the creation of a Scorer before
 	//  receiving its score.
 
-	//noMoreScorers := make(chan bool, 1)
+	noMoreScorers := make(chan bool, 1)
 	// Bool channel to inform the Accumulator that it can start counting down to completion.
 
-	//scoreBufferSize := 32
-	//scores := make(chan *site, scoreBufferSize)
-	// Buffered site* channel so finished scorers will exit without waiting on the Accumulator,
-	//  which would otherwise waste memory.
+	scoreBufferSize := 32
+	scores := make(chan *site, scoreBufferSize)
+	// Buffered site* channel so finished scorers will typically exit without waiting on the
+	//  Accumulator, which would otherwise waste memory.
 	// NOTE: This depends on the relationship between Scoring Dispatcher limiting and scores
 	//  buffer size
 
@@ -97,86 +104,159 @@ func main() {
 		file, err := os.Open(arguments["<INFILE>"].(string))
 		if err != nil {
 			log.Fatalln(err)
-		}	
+		}
 
-		doc, err = htmlquery.Parse(bufio.NewReader(file))
+		doc, err = htmlquery.Parse(file)
 		if err != nil {
 			log.Fatalln(err)
 		}
 		file.Close()
 	}
 
+	documentLoaded := time.Now()
+
 	// Parse HTML tree for markers
 	contentDiv := htmlquery.FindOne(doc, "/html/body/div[@id='content']")
 	countryDivs := htmlquery.Find(contentDiv, "/h3")
 	siteDivs := htmlquery.Find(contentDiv, "/text()[normalize-space(.)='Site:']")
+	packageURLDivs := htmlquery.Find(contentDiv, "/text()[starts-with(normalize-space(.), 'Packages over ')]")
+	archDivs := htmlquery.Find(contentDiv, "/text()[starts-with(normalize-space(.), 'Includes architectures: ')]")
+	typeDivs := htmlquery.Find(contentDiv, "/text()[starts-with(normalize-space(.), 'Type: ')]")
+	breakDivs := htmlquery.Find(contentDiv, "/br")
 
 	log.Println("Found", len(countryDivs), "countries.")
 	log.Println("Found", len(siteDivs), "sites.")
+	log.Println("Found", len(packageURLDivs), "package URLs.")
 
 	// Storage for Sites
-	sites := make([]site, 0)
+	sites := make([]*site, 0)
 
-	// Loop through sibling nodes in document
+	// Loop through sibling nodes in document, searching for prefixs
 	// Current state through loop, starts with none found
 	countryIndex := -1
 	siteIndex := -1
+	packageURLIndex := -1
+	archIndex := -1
+	typeIndex := -1
+	breakIndex := -1
 	node := countryDivs[0].PrevSibling
 	var s site
 
-	for true {
+	for {
 		node = node.NextSibling
 		if node == nil {
 			// We've reached end of document when there are no more siblings
-			sites = append(sites, s)
+			sites = append(sites, &s)
 			break
+		} else if breakIndex+1 < len(breakDivs) && node == breakDivs[breakIndex+1] {
+			breakIndex++
+			continue
 		} else if countryIndex+1 < len(countryDivs) && node == countryDivs[countryIndex+1] {
-			// Mark that we've entered a new country
+			// Country prefix
 			countryIndex++
 		} else if siteIndex+1 < len(siteDivs) && node == siteDivs[siteIndex+1] {
-			// Mark that we've entered a new site, saving the old to the slice
+			// Site prefix
+			// Save old site
 			if siteIndex != -1 {
-				sites = append(sites, s)
+				sites = append(sites, &s)
 			}
+			// Make new site
 			siteIndex++
-			s = site{Strings: make([]string, 0)}
+			s = site{PackProtocols: make(map[string]*url.URL)}
+			// Record site url
+			node = node.NextSibling
+			if node == nil || htmlquery.FindOne(node, "self::tt") == nil {
+				log.Fatalln("Parsing site URL failed")
+			}
+			s.Hosts = strings.Split(htmlquery.InnerText(node), ",")
+		} else if packageURLIndex+1 < len(packageURLDivs) && node == packageURLDivs[packageURLIndex+1] {
+			// Package URL prefix
+			packageURLIndex++
+			// Read protocol
+			protocol := strings.TrimPrefix(htmlquery.InnerText(node), "Packages over ")
+			protocol = strings.TrimSuffix(protocol, ": ")
+			// Read URL
+			node = node.NextSibling
+			if node == nil || htmlquery.FindOne(node, "self::tt") == nil {
+				log.Fatalln("Parsing package URL failed")
+			}
+			var URL *url.URL
+			switch protocol {
+			case "HTTP":
+				URL, err = url.Parse(htmlquery.SelectAttr(node.FirstChild, "href"))
+				if err != nil {
+					log.Fatalln(err)
+				}
+				URL.Scheme = "http"
+			case "rsync":
+				// Resolve relative rsync URL
+				URL = &url.URL{Scheme: "rsync", Host: s.Hosts[0]}
+				URL.Path = strings.TrimSpace(htmlquery.InnerText(node))
+			}
+			s.PackProtocols[protocol] = URL
+		} else if typeIndex+1 < len(typeDivs) && node == typeDivs[typeIndex+1] {
+			// Type prefix
+			typeIndex++
+			s.SiteType = strings.TrimPrefix(strings.TrimSpace(htmlquery.InnerText(node)), "Type: ")
+		} else if archIndex+1 < len(archDivs) && node == archDivs[archIndex+1] {
+			archIndex++
+			archListString := htmlquery.InnerText(node)
+			archListString = strings.TrimSpace(archListString)
+			archListString = strings.TrimPrefix(archListString, "Includes architectures: ")
+			s.Architectures = strings.Split(archListString, " ")
 		} else {
-			// Parse this node for site content
-			s.Strings = append(s.Strings, htmlquery.OutputHTML(node, true))
+			//log.Println("Ignoring token:", htmlquery.OutputHTML(node, true))
 		}
 	}
 
+	docParsed := time.Now()
+
 	/*
 		log.Println(len(sites))
-		for _, s := range sites[:5] {
-	    	    log.Println(s.Strings)
+		for _, s := range sites[:10] {
+			log.Dump(s)
 		}
 	*/
 
-	//log.Println(htmlquery.OutputHTML(mirrorListDiv, true))
+	go scoringDispatcher(sites, scorerCreated, noMoreScorers, scores)
 
-	//go scoringDispatcher(parsedSites, noMoreScorers)
+	results := resultsAccumulator(scorerCreated, noMoreScorers, scores)
 
-	//resultsAccumulator(noMoreScorers)
+        scoringDone := time.Now()
+	
+	log.Println(results)
+	log.Println("Parsing CLI Arguments took", cliArgsParsed.Sub(start))
+	log.Println("Loading document took", documentLoaded.Sub(cliArgsParsed))
+	log.Println("Parsing document took", docParsed.Sub(documentLoaded))
+	log.Println("Scoring took", scoringDone.Sub(docParsed))
 }
 
 type site struct {
-	Strings         []string
-	SiteUrl         string
-	SiteType        string
-	Architectures   []string
-	Protocols       []string
-	UpdateFrequency string
+	Hosts         []string
+	SiteType      string
+	Architectures []string
+	PackProtocols map[string]*url.URL
+	//UpdateFrequency string
+	Score int
 }
 
 //  The Scoring Dispatcher will:
-//      Iterate over parsedSites:
+//      Iterate over sites:
 //          If site matches all filtering criteria:
 //              Send into scorerCreated
 //              Spawn a Scorer coroutine
 //      When all sites have been found:
 //          Send true into noMoreScorers
 //          Exit
+func scoringDispatcher(sites []*site, scorerCreated chan bool, noMoreScorers chan bool, scores chan *site) {
+	for _, s := range sites {
+		if true {
+			scorerCreated <- true
+			go score(s, scores)
+		}
+	}
+	noMoreScorers <- true
+}
 
 //  Each Scorer will:
 //      Try connecting over desired protocols
@@ -184,12 +264,10 @@ type site struct {
 //          Send worst score into scores and exit
 //      Run ping/traceroute algorithm
 //      Whether succeeds or times out, send into scores and exit
-//func scoringDispatcher(parsedSites chan *site, noMoreScorers chan bool) {
-//    for s := range parsedSites {
-//        log.Println(s.dumbyVar)
-//    }
-//    noMoreScorers <- true
-//}
+func score(s *site, scores chan *site) {
+	s.Score = 0
+	scores <- s
+}
 
 //  The Results Accumulator will:
 //      Infinitely select over:
@@ -205,6 +283,28 @@ type site struct {
 //      Pop sites off of heap.
 //      Format sites and write to OUTFILE.
 //      Exit
-//func resultsAccumulator(noMoreScorers chan bool) {
-//    <- noMoreScorers
-//}
+func resultsAccumulator(scorerCreated chan bool, noMoreScorers chan bool, scores chan *site) []int {
+        results := make([]int, 0)
+	done := false
+	scorers := 0
+	for {
+		select {
+		case <-scorerCreated:
+			scorers++
+		case <-noMoreScorers:
+			done = true
+			if scorers == 0 {
+				return results
+			}
+		case s := <-scores:
+			//log.Println("Score received:", s.Score)
+			results = append(results, s.Score)
+			//Heap
+			scorers--
+			if done && scorers == 0 {
+                            return results
+			}
+		}
+	}
+
+}
