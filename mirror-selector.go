@@ -143,13 +143,13 @@ func main() {
 	typeIndex := -1
 	breakIndex := -1
 	node := countryDivs[0].PrevSibling
-	var s site
+	var s *site
 
 	for {
 		node = node.NextSibling
 		if node == nil {
 			// We've reached end of document when there are no more siblings
-			sites = append(sites, &s)
+			sites = append(sites, s)
 			break
 		} else if breakIndex+1 < len(breakDivs) && node == breakDivs[breakIndex+1] {
 			breakIndex++
@@ -161,11 +161,14 @@ func main() {
 			// Site prefix
 			// Save old site
 			if siteIndex != -1 {
-				sites = append(sites, &s)
+				sites = append(sites, s)
 			}
 			// Make new site
 			siteIndex++
-			s = site{PackProtocols: make(map[string]*url.URL)}
+			s = &site{
+    			    PackProtocols: make(map[string]*url.URL),
+    			    Country: htmlquery.InnerText(countryDivs[countryIndex]),
+		        }
 			// Record site url
 			node = node.NextSibling
 			if node == nil || htmlquery.FindOne(node, "self::tt") == nil {
@@ -186,11 +189,24 @@ func main() {
 			var URL *url.URL
 			switch protocol {
 			case "HTTP":
+                                // Record HTTP URL
 				URL, err = url.Parse(htmlquery.SelectAttr(node.FirstChild, "href"))
 				if err != nil {
 					log.Fatalln(err)
 				}
 				URL.Scheme = "http"
+
+				// Assume same path for FTP if in host
+				for _, host := range s.Hosts {
+                                    if strings.HasPrefix(host, "ftp.") {
+                                        s.PackProtocols["ftp"] = &url.URL{
+                                            Scheme: "ftp",
+                                            Host: host,
+                                            Path: URL.Path,
+                                        }
+                                        break
+                                    }
+				}
 			case "rsync":
 				// Resolve relative rsync URL
 				URL = &url.URL{Scheme: "rsync", Host: s.Hosts[0]}
@@ -214,12 +230,10 @@ func main() {
 
 	docParsed := time.Now()
 
-	/*
 		log.Println(len(sites))
 		for _, s := range sites[:10] {
 			log.Dump(s)
 		}
-	*/
 
 	go scoringDispatcher(sites)
 
@@ -235,6 +249,7 @@ func main() {
 }
 
 type site struct {
+        Country       string
 	Hosts         []string
 	SiteType      string
 	Architectures []string
