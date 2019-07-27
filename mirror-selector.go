@@ -16,6 +16,9 @@ import (
 	"golang.org/x/net/html"
 	"net/url"
 	"strings"
+
+	// Determining Architecture
+	"os/exec"
 )
 
 var usage = `Name:
@@ -52,7 +55,7 @@ Options:
                                ppc64el, s390, s390x, source, or sparc. Defaults to consulting
                                dpkg for current machine architecture.
                                                         
-   -r --release RELEASE      Which Debian release to look for [default: stable]. Accepts
+   -r --release RELEASE      Which Debian release to target [default: stable]. Accepts
                                targets (stable, testing, unstable, or experimental) or 
                                code names (wheezy, jessie, stretch, ... etc.).
    -h --help                 Prints this help text.
@@ -166,9 +169,9 @@ func main() {
 			// Make new site
 			siteIndex++
 			s = &site{
-    			    PackProtocols: make(map[string]*url.URL),
-    			    Country: htmlquery.InnerText(countryDivs[countryIndex]),
-		        }
+				PackProtocols: make(map[string]*url.URL),
+				Country:       htmlquery.InnerText(countryDivs[countryIndex]),
+			}
 			// Record site url
 			node = node.NextSibling
 			if node == nil || htmlquery.FindOne(node, "self::tt") == nil {
@@ -189,23 +192,23 @@ func main() {
 			var URL *url.URL
 			switch protocol {
 			case "HTTP":
-                                // Record HTTP URL
+				// Record HTTP URL
 				URL, err = url.Parse(htmlquery.SelectAttr(node.FirstChild, "href"))
 				if err != nil {
 					log.Fatalln(err)
 				}
 				URL.Scheme = "http"
 
-				// Assume same path for FTP if in host
+				// Assume same path for FTP as HTTP if ftp is in a hostname
 				for _, host := range s.Hosts {
-                                    if strings.HasPrefix(host, "ftp.") {
-                                        s.PackProtocols["ftp"] = &url.URL{
-                                            Scheme: "ftp",
-                                            Host: host,
-                                            Path: URL.Path,
-                                        }
-                                        break
-                                    }
+					if strings.HasPrefix(host, "ftp.") {
+						s.PackProtocols["ftp"] = &url.URL{
+							Scheme: "ftp",
+							Host:   host,
+							Path:   URL.Path,
+						}
+						break
+					}
 				}
 			case "rsync":
 				// Resolve relative rsync URL
@@ -230,17 +233,34 @@ func main() {
 
 	docParsed := time.Now()
 
-		log.Println(len(sites))
-		for _, s := range sites[:10] {
-			log.Dump(s)
-		}
+        /*
+	log.Println(len(sites))
+	for _, s := range sites[:10] {
+		log.Dump(s)
+	}
+	*/
+	
+        var architecture string
+	if arguments["--architecture"] == nil {
+        	archOut, err := exec.Command("dpkg", "--print-architecture").Output()
+        	if err != nil {
+        		log.Fatalln(err)
+        	}
+        	architecture = strings.TrimSpace(string(archOut))
+	} else {
+    	    architecture = arguments["--architecture"].(string)
+	}
 
-	go scoringDispatcher(sites)
+	var protocols []string
+
+	go scoringDispatcher(sites, architecture, protocols)
 
 	results := resultsAccumulator()
 
 	scoringDone := time.Now()
 
+	log.Dump(arguments)
+	log.Dump(architecture)
 	log.Println(results)
 	log.Println("Parsing CLI Arguments took", cliArgsParsed.Sub(start))
 	log.Println("Loading document took", documentLoaded.Sub(cliArgsParsed))
@@ -249,7 +269,7 @@ func main() {
 }
 
 type site struct {
-        Country       string
+	Country       string
 	Hosts         []string
 	SiteType      string
 	Architectures []string
@@ -266,7 +286,7 @@ type site struct {
 //      When all sites have been found:
 //          Send true into noMoreScorers
 //          Exit
-func scoringDispatcher(sites []*site) {
+func scoringDispatcher(sites []*site, architecture string, protocols []string) {
 	for _, s := range sites {
 		if true {
 			scorerCreated <- true
